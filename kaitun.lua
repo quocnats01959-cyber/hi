@@ -307,7 +307,7 @@ if getgenv().ConfigsKaitun == nil then
         -- Tự ấp trứng đang cầm trong túi (OpenEgg)
         AutoClaimMailbox = {
             Enabled = true,
-            Delay = 60,
+            Delay = 10,
             MaxPerCycle = 20,
         },
 
