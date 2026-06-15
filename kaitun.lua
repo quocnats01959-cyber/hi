@@ -211,7 +211,7 @@ if getgenv().ConfigsKaitun == nil then
         -- Tự thu hoạch quả chín trong plot mình
         AutoCollect = {
             Enabled = true,
-            Delay   = 1,
+            Delay   = 0.1,
             RemoteOnly = true,
             TeleportToFruit = false,
             TeleportDistance = 4,
@@ -307,7 +307,7 @@ if getgenv().ConfigsKaitun == nil then
         -- Tự ấp trứng đang cầm trong túi (OpenEgg)
         AutoClaimMailbox = {
             Enabled = true,
-            Delay = 10,
+            Delay = 60,
             MaxPerCycle = 20,
         },
 
@@ -602,6 +602,11 @@ do
         s.DelayMax = cd
     end
 
+    -- Sell At Night (NIGHT - SELL FAST): true = ĐÊM CŨNG BÁN (bán nhanh). false = đêm KHÔNG bán (đợi sáng).
+    if type(CFG["Sell At Night"]) == "boolean" then
+        ensure("AutoSell").SellAtNight = CFG["Sell At Night"]
+    end
+
     -- Autobuyplot: tự mua mở rộng vườn.
     if type(CFG.Autobuyplot) == "boolean" then
         ensure("AutoExpandGarden").Enabled = CFG.Autobuyplot
@@ -651,11 +656,16 @@ do
     end
 
     -- PlanQuota (mục 5,6): bảng quota DÙNG CHUNG cho trồng (AutoPlant) + cleanup (TrimToQuota) + GUI.
+    -- PlanQuota = "danh sách trồng": cây CÓ trong list -> trồng tới N + giữ N; cây NGOÀI list -> KHÔNG
+    -- trồng (OnlyQuota) + ĐÀO (TrimToQuota.DigUnlisted). Đây là rule "safe tree" theo ý chồng.
     if type(CFG.PlanQuota) == "table" and next(CFG.PlanQuota) then
         local ap = ensure("AutoPlant")
         ap.PlantQuota = CFG.PlanQuota
         ap.UsePlantQuota = true
-        ensure("TrimToQuota").Quota = CFG.PlanQuota
+        ap.OnlyQuota = true                       -- chỉ trồng cây trong PlanQuota
+        local t = ensure("TrimToQuota")
+        t.Quota = CFG.PlanQuota
+        t.DigUnlisted = true                      -- đào cây ngoài PlanQuota
     end
     -- Trim To Quota (mục 6): đào cây DƯ về quota. boolean = bật/tắt; table = chỉnh sâu (Limit/DestroyUntil hỗ trợ "%").
     local tq = CFG["Trim To Quota"]
@@ -669,8 +679,11 @@ do
         if tq["Destroy Untill"] ~= nil then t.DestroyUntil = tq["Destroy Untill"] end
         if tq["Destroy Until"] ~= nil then t.DestroyUntil = tq["Destroy Until"] end
         if tq.DestroyUntil ~= nil then t.DestroyUntil = tq.DestroyUntil end
+        if tonumber(tq.Delay) then t.Delay = tonumber(tq.Delay) end
         if tonumber(tq.MaxPerCycle) then t.MaxPerCycle = tonumber(tq.MaxPerCycle) end
+        if tonumber(tq.DigDelay) then t.DigDelay = tonumber(tq.DigDelay) end
         if type(tq.KeepMutations) == "table" then t.KeepMutations = tq.KeepMutations end
+        if type(tq.DigUnlisted) == "boolean" then t.DigUnlisted = tq.DigUnlisted end
     end
 
     -- Seed.Buy (Auto=mua hết / Custom=mua theo list) + Seed.Place (Lock/Select hạt được trồng).
@@ -679,7 +692,30 @@ do
         if type(seed.Buy) == "table" then
             local b = ensure("AutoBuySeed")
             b.Enabled = true
-            if tostring(seed.Buy.Mode or "Auto"):lower() == "custom" then
+            -- List/Custom có thể là MẢNG {tên} HOẶC MAP {tên=số lượng}. Map -> mua đúng các tên đó,
+            -- mỗi loại tới SỐ trong map (OwnLimitPerSeed). Đây là "mua theo list + số lượng".
+            local buyList = seed.Buy.List or seed.Buy.Custom
+            if type(buyList) == "table" and next(buyList) ~= nil then
+                local isMap = false
+                for k in pairs(buyList) do if type(k) == "string" then isMap = true break end end
+                local names = {}
+                if isMap then
+                    local caps = {}
+                    for name, cnt in pairs(buyList) do
+                        if type(name) == "string" and name ~= "" then
+                            table.insert(names, name)
+                            if tonumber(cnt) then caps[name] = tonumber(cnt) end
+                        end
+                    end
+                    b.OwnLimitPerSeed = caps
+                else
+                    for _, name in ipairs(buyList) do
+                        if type(name) == "string" and name ~= "" then table.insert(names, name) end
+                    end
+                end
+                b.Mode = "List"
+                b.List = names
+            elseif tostring(seed.Buy.Mode or "Auto"):lower() == "custom" then
                 b.Mode = "List"
                 b.List = type(seed.Buy.Custom) == "table" and seed.Buy.Custom or {}
             else
@@ -771,21 +807,39 @@ do
     -- Automail: To + Seeds + Pets (theo tên). Claim mail luôn bật ngầm, loop mặc định.
     if type(CFG.Automail) == "table" then
         local am = CFG.Automail
-        local to = type(am.To) == "string" and am.To ~= "" and am.To or nil
+        -- To: 1 tên (string) -> LUÔN gửi acc đó.  HOẶC list {tên1,tên2,...} -> RANDOM 1 tên mỗi lần gửi.
+        local to, toList = nil, nil
+        if type(am.To) == "string" and am.To ~= "" then
+            to = am.To
+        elseif type(am.To) == "table" then
+            toList = {}
+            for _, nm in ipairs(am.To) do
+                if type(nm) == "string" and nm ~= "" then table.insert(toList, nm) end
+            end
+            if #toList == 0 then
+                toList = nil
+            elseif #toList == 1 then            -- chỉ 1 tên trong list = coi như gửi cố định 1 acc
+                to = toList[1]; toList = nil
+            end
+        end
+        local function applyTo(cfg)
+            if to then cfg.RecipientUsername = to end
+            if toList then cfg.RecipientUsernames = toList end
+        end
         ensure("AutoClaimMailbox").Enabled = true
         local sd2 = ensure("AutoMailSeeds")
         sd2.Enabled = type(am.Seeds) == "table" and #am.Seeds > 0
         if type(am.Seeds) == "table" then sd2.SeedNames = am.Seeds end
-        if to then sd2.RecipientUsername = to end
+        applyTo(sd2)
         local pt = ensure("AutoMailPets")
         pt.Enabled = type(am.Pets) == "table" and #am.Pets > 0
         if type(am.Pets) == "table" then pt.PetNames = am.Pets end
-        if to then pt.RecipientUsername = to end
-        if to then ensure("AutoMailRainbow").RecipientUsername = to end
+        applyTo(pt)
+        applyTo(ensure("AutoMailRainbow"))
         -- Mail Fruits (trái cây): Fruits=true bật; Only Fruits=lọc tên; Min Fruits=đợi đủ; Instead Of Sell.
         local fr = ensure("AutoMailFruits")
         fr.Enabled = am.Fruits == true
-        if to then fr.RecipientUsername = to end
+        applyTo(fr)
         if am.Note ~= nil then fr.Note = am.Note end
         if type(am["Only Fruits"]) == "table" then fr.OnlyThese = am["Only Fruits"] end
         if tonumber(am["Min Fruits"]) then fr.MinFruits = tonumber(am["Min Fruits"]) end
@@ -851,6 +905,7 @@ do
 end
 
 setDefault(CFG, "ActionLogEnabled", true)
+setDefault(CFG, "SideTaskMinDelay", 1.5)   -- delay tối thiểu cho tác vụ phụ (mua seed/gear/crate/egg/sprinkler...) -> nhẹ FPS
 
 CFG.AutoBuySeed = CFG.AutoBuySeed or {}
 setDefault(CFG.AutoBuySeed, "Enabled", true)
@@ -871,6 +926,7 @@ setDefault(CFG.AutoPlant, "PauseWhenPlotFull", true)
 -- Trồng nhiều cây xịn (cao cấp = 50), ít cây phổ thông (Carrot 10, đám common 4) -> tối ưu tiền.
 -- Đủ quota thì KHÔNG trồng thêm loại đó (seed dư nằm lại trong túi). Bật/tắt bằng UsePlantQuota.
 setDefault(CFG.AutoPlant, "UsePlantQuota", true)
+setDefault(CFG.AutoPlant, "OnlyQuota", false)   -- true = CHỈ trồng cây có trong PlantQuota (ngoài list không trồng)
 setDefault(CFG.AutoPlant, "PlantQuota", {
     ["Carrot"] = 10,
     ["Strawberry"] = 4,
@@ -1069,8 +1125,10 @@ setDefault(CFG.TrimToQuota, "Enabled", false)              -- mặc định TẮ
 setDefault(CFG.TrimToQuota, "Limit", 0)                     -- 0 = trim liên tục; "100%" hoặc số = chỉ trim khi tổng cây >= mức này
 setDefault(CFG.TrimToQuota, "DestroyUntil", 0)             -- 0 = trim hết phần dư; "90%"/số = dừng khi tổng cây <= mức này
 setDefault(CFG.TrimToQuota, "Delay", 8)
-setDefault(CFG.TrimToQuota, "MaxPerCycle", 20)             -- mỗi vòng đào tối đa N cây
+setDefault(CFG.TrimToQuota, "MaxPerCycle", 20)             -- mỗi vòng đào tối đa N cây. 0 = KHÔNG giới hạn (đào hết tới Destroy Until)
+setDefault(CFG.TrimToQuota, "DigDelay", 0.3)              -- nghỉ giữa mỗi nhát đào (giây). Nhỏ = đào nhanh hơn (đừng < 0.05 dễ bị server chặn)
 setDefault(CFG.TrimToQuota, "KeepMutations", { "Gold", "Rainbow" })
+setDefault(CFG.TrimToQuota, "DigUnlisted", false)  -- true = đào luôn cây KHÔNG có trong quota (ngoài PlanQuota)
 
 CFG.AutoSnapPets = CFG.AutoSnapPets or {}
 setDefault(CFG.AutoSnapPets, "Enabled", true)
@@ -1247,7 +1305,7 @@ setDefault(CFG.KeepSeeds, "List", { "Rainbow", "Gold", "Moon Bloom" })
 
 CFG.AutoMailRainbow = CFG.AutoMailRainbow or {}
 setDefault(CFG.AutoMailRainbow, "Enabled", true)
-setDefault(CFG.AutoMailRainbow, "RecipientUsername", "chuideptrai1209")
+setDefault(CFG.AutoMailRainbow, "RecipientUsername", "")  -- rỗng = KHÔNG gửi cho ai (an toàn, không fallback tên lạ)
 setDefault(CFG.AutoMailRainbow, "RecipientUserId", 0)
 setDefault(CFG.AutoMailRainbow, "Note", "chuideptraiqua")
 setDefault(CFG.AutoMailRainbow, "SendCount", 1)
@@ -1257,7 +1315,7 @@ setDefault(CFG.AutoMailRainbow, "SkipResentKey", true)
 
 CFG.AutoMailSeeds = CFG.AutoMailSeeds or {}
 setDefault(CFG.AutoMailSeeds, "Enabled", true)
-setDefault(CFG.AutoMailSeeds, "RecipientUsername", CFG.AutoMailRainbow.RecipientUsername or "chuideptrai1209")
+setDefault(CFG.AutoMailSeeds, "RecipientUsername", CFG.AutoMailRainbow.RecipientUsername or "")  -- rỗng = KHÔNG gửi
 setDefault(CFG.AutoMailSeeds, "RecipientUserId", tonumber(CFG.AutoMailRainbow.RecipientUserId) or 0)
 setDefault(CFG.AutoMailSeeds, "Note", CFG.AutoMailRainbow.Note or "chuideptraiqua")
 setDefault(CFG.AutoMailSeeds, "SeedNames", { "Rainbow" })
@@ -1272,7 +1330,7 @@ setDefault(CFG.AutoMailSeeds, "Delay", 30)
 -- để chúng ở lại túi. Super(7) > Mythic(6): MinRarity="Mythic" => gửi cả Mythic lẫn Super.
 CFG.AutoMailPets = CFG.AutoMailPets or {}
 setDefault(CFG.AutoMailPets, "Enabled", true)
-setDefault(CFG.AutoMailPets, "RecipientUsername", "chuideptrai1209")
+setDefault(CFG.AutoMailPets, "RecipientUsername", "")  -- rỗng = KHÔNG gửi cho ai (an toàn)
 setDefault(CFG.AutoMailPets, "RecipientUserId", 0)
 setDefault(CFG.AutoMailPets, "Note", "chuideptraiqua")
 setDefault(CFG.AutoMailPets, "PetNames", { "Raccoon", })
@@ -2775,8 +2833,23 @@ Runtime.GetPriorityWildPetCandidate = function()
     local keep = tonumber(c.KeepSheckles) or 0
     local budget = math.max((tonumber(getSheckles()) or 0) - keep, 0)
     local minRarity = normalizeRarity(c.PriorityMinRarity or c.MinRarity or "Legendary")
-    local best
 
+    -- CHỈ ưu tiên pet mà AutoTameWildPet THỰC SỰ mua (khớp Buy map / PetNames). Nếu config chỉ mua
+    -- Unicorn/GD/Monkey/Deer thì thấy Robin KHÔNG được bắt task khác nhường (tránh kẹt vô hạn).
+    local nameSet
+    if type(c.OwnLimit) == "table" and next(c.OwnLimit) ~= nil then
+        nameSet = {}
+        for kName in pairs(c.OwnLimit) do
+            if type(kName) == "string" then nameSet[string.lower(kName)] = true end
+        end
+    elseif type(c.PetNames) == "table" and #c.PetNames > 0 then
+        nameSet = {}
+        for _, n in ipairs(c.PetNames) do
+            if type(n) == "string" and n ~= "" then nameSet[string.lower(n)] = true end
+        end
+    end
+
+    local best
     for _, ref in ipairs(folder:GetChildren()) do
         if ref:IsA("BasePart") then
             local petName = ref:GetAttribute("PetName")
@@ -2784,7 +2857,14 @@ Runtime.GetPriorityWildPetCandidate = function()
             local price = tonumber(ref:GetAttribute("Price")) or 0
             if type(petName) == "string" and petName ~= "" and ownerUserId ~= LocalPlayer.UserId and price <= budget then
                 local rarity = normalizeRarity(ref:GetAttribute("Rarity") or (PetData and PetData[petName] and PetData[petName].Rarity) or "Common")
-                if rarityAllowed(rarity, minRarity) then
+                -- có Buy list -> tên phải nằm trong list; không có -> theo độ hiếm như cũ.
+                local allow
+                if nameSet then
+                    allow = nameSet[string.lower(petName)] == true
+                else
+                    allow = rarityAllowed(rarity, minRarity)
+                end
+                if allow then
                     local score = ((RarityScore[rarity] or 0) * 100000000) + price
                     if not best or score > best.Score then
                         best = {
@@ -2829,6 +2909,30 @@ Runtime.ShouldYieldForPetPriority = function(action)
         return true
     end
     return false
+end
+
+-- ĐANG TRIM (đào cây) -> các tác vụ phụ NHƯỜNG (trim thì lo trim). State.TrimActiveUntil được
+-- doTrimToQuota refresh mỗi nhát đào, set 0 khi trim xong (tự hết hạn sau ~15s nếu lỡ miss clear).
+Runtime.ShouldYieldForTrim = function(action)
+    if (tonumber(State.TrimActiveUntil) or 0) > os.clock() then
+        actionLog(action or "Priority", "SKIP", "trim first")
+        return true
+    end
+    return false
+end
+
+-- TỐI ƯU FPS: ép delay TỐI THIỂU cho các tác vụ phụ (mặc định 1.5s) -> bớt chạy chồng chéo.
+-- Các task ưu tiên/nặng (AutoCollect, AutoCollectDrops, AutoSell, claim event...) KHÔNG bị ép.
+-- Knob: CFG.SideTaskMinDelay (giây).
+Runtime.SideTaskSet = {
+    AutoBuySeed = true, AutoBuyGear = true, AutoBuyCrate = true, AutoHatchEgg = true,
+    AutoSprinkler = true, AutoWater = true, AutoOpenCrate = true, AutoOpenSeedPack = true,
+}
+Runtime.ApplySideTaskMinDelay = function(name, delay)
+    if Runtime.SideTaskSet[name] then
+        return math.max(tonumber(delay) or 1, tonumber(CFG.SideTaskMinDelay) or 1.5)
+    end
+    return delay
 end
 
 local WebhookSeen = {}
@@ -3515,7 +3619,7 @@ local function setupKaitunDashboard()
     -- PLAN QUOTA panel (mục 5,11): hiện count/quota từng loại + OK/NEED/EXTRA.
     local quotaPanel = panel(body, "Quota")
     quotaPanel.Position = UDim2.new(0.27, 6, 0, 0)
-    quotaPanel.Size = UDim2.new(0.30, -6, 1, 0)
+    quotaPanel.Size = UDim2.new(0.30, -6, 0.56, -4)   -- chia đôi cột: TRÊN = Plan Quota
     pad(quotaPanel, 12, 12, 6, 12)
 
     local quotaTitle = text(quotaPanel, "Title", "PLAN QUOTA (cay/quota)", 13, true)
@@ -3537,6 +3641,30 @@ local function setupKaitunDashboard()
     quotaLayout.SortOrder = Enum.SortOrder.LayoutOrder
     quotaLayout.Parent = quotaScroll
     local quotaRows = {}
+
+    -- SEEDS TRONG TÚI panel (mục E): nằm DƯỚI Plan Quota, hiện tên hạt + số lượng đang có.
+    local seedInvPanel = panel(body, "SeedInv")
+    seedInvPanel.Position = UDim2.new(0.27, 6, 0.56, 4)
+    seedInvPanel.Size = UDim2.new(0.30, -6, 0.44, -4)
+    pad(seedInvPanel, 12, 12, 6, 12)
+    local seedInvTitle = text(seedInvPanel, "Title", "SEEDS TUI (ten/so luong)", 13, true)
+    seedInvTitle.TextColor3 = COL_SUB
+    seedInvTitle.Size = UDim2.new(1, 0, 0, 18)
+    local seedInvScroll = Instance.new("ScrollingFrame")
+    seedInvScroll.Name = "List"
+    seedInvScroll.BackgroundTransparency = 1
+    seedInvScroll.BorderSizePixel = 0
+    seedInvScroll.Position = UDim2.fromOffset(0, 26)
+    seedInvScroll.Size = UDim2.new(1, 0, 1, -26)
+    seedInvScroll.ScrollBarThickness = 5
+    seedInvScroll.CanvasSize = UDim2.new(0, 0, 0, 0)
+    seedInvScroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
+    seedInvScroll.Parent = seedInvPanel
+    local seedInvLayout = Instance.new("UIListLayout")
+    seedInvLayout.Padding = UDim.new(0, 1)
+    seedInvLayout.SortOrder = Enum.SortOrder.LayoutOrder
+    seedInvLayout.Parent = seedInvScroll
+    local seedInvRows = {}
 
     local logPanel = panel(body, "Log")
     logPanel.Position = UDim2.new(0.57, 6, 0, 0)
@@ -3682,6 +3810,53 @@ local function setupKaitunDashboard()
         end
         for name, row in pairs(quotaRows) do
             if not qlive[name] then pcall(function() row:Destroy() end); quotaRows[name] = nil end
+        end
+
+        -- ===== SEEDS TRONG TÚI panel: đọc Inventory.Seeds {tên=count} =====
+        local invSeeds = {}
+        do
+            local rep = getPlayerReplica()
+            local seeds = rep and rep.Data and rep.Data.Inventory and rep.Data.Inventory.Seeds
+            if type(seeds) == "table" then
+                for nm, cnt in pairs(seeds) do
+                    local n = math.floor(tonumber(cnt) or 0)
+                    if type(nm) == "string" and nm ~= "" and n > 0 then invSeeds[nm] = n end
+                end
+            end
+        end
+        local snames = {}
+        for nm in pairs(invSeeds) do table.insert(snames, nm) end
+        table.sort(snames, function(a, b)
+            if invSeeds[a] ~= invSeeds[b] then return invSeeds[a] > invSeeds[b] end
+            return a < b
+        end)
+        local slive = {}
+        for idx, nm in ipairs(snames) do
+            slive[nm] = true
+            local row = seedInvRows[nm]
+            if not row then
+                row = Instance.new("TextLabel")
+                row.BackgroundTransparency = 1
+                row.Font = Enum.Font.Code
+                row.TextSize = 12
+                row.TextXAlignment = Enum.TextXAlignment.Left
+                row.Size = UDim2.new(1, -4, 0, 15)
+                row.Parent = seedInvScroll
+                seedInvRows[nm] = row
+            end
+            row.LayoutOrder = idx
+            row.Text = ("%s: x%d"):format(nm, invSeeds[nm])
+            local low = string.lower(nm)
+            if low:find("rainbow") then
+                row.TextColor3 = Color3.fromRGB(190, 120, 255)
+            elseif low:find("gold") then
+                row.TextColor3 = Color3.fromRGB(255, 215, 0)
+            else
+                row.TextColor3 = COL_TEXT
+            end
+        end
+        for nm, row in pairs(seedInvRows) do
+            if not slive[nm] then pcall(function() row:Destroy() end); seedInvRows[nm] = nil end
         end
 
         local lines = {}
@@ -3986,7 +4161,7 @@ end
 function Runtime.doAutoBuySeed()
     local c = CFG.AutoBuySeed
     if not (c and c.Enabled) then return end
-    if Runtime.ShouldYieldForSeedPriority("AutoBuySeed") or Runtime.ShouldYieldForPetPriority("AutoBuySeed") then
+    if Runtime.ShouldYieldForSeedPriority("AutoBuySeed") or Runtime.ShouldYieldForPetPriority("AutoBuySeed") or Runtime.ShouldYieldForTrim("AutoBuySeed") then
         return
     end
     actionLog("AutoBuySeed", "START")
@@ -4088,9 +4263,13 @@ function Runtime.doAutoBuySeed()
     local bought = 0
 
     if mode == "list" or mode == "custom" then
+        -- Mua MỖI loại trong List tới đủ số (cap riêng OwnLimitPerSeed) trong 1 vòng, không phải 1 con/vòng.
         for _, seedName in ipairs(c.List or {}) do
-            if buySeed(seedName) then
+            local n = 0
+            while n < maxPerSeed do
+                if not buySeed(seedName) then break end   -- buySeed tự dừng khi đã đủ cap / hết stock / hết tiền
                 bought = bought + 1
+                n = n + 1
                 if not waitAlive(tonumber(c.Delay) or 0.35) then return end
             end
         end
@@ -4152,7 +4331,7 @@ end
 function Runtime.doAutoPlant()
     local c = CFG.AutoPlant
     if not (c and c.Enabled) then return end
-    if Runtime.ShouldYieldForSeedPriority("AutoPlant") or Runtime.ShouldYieldForPetPriority("AutoPlant") then
+    if Runtime.ShouldYieldForSeedPriority("AutoPlant") or Runtime.ShouldYieldForPetPriority("AutoPlant") or Runtime.ShouldYieldForTrim("AutoPlant") then
         return
     end
     actionLog("AutoPlant", "START")
@@ -4227,6 +4406,10 @@ function Runtime.doAutoPlant()
                     else
                         maxTry = math.min(maxTry, allowed)
                     end
+                elseif c.OnlyQuota then
+                    -- OnlyQuota: cây KHÔNG nằm trong PlantQuota -> KHÔNG trồng (để dành slot cho cây trong list).
+                    actionLog("AutoPlant", "SKIP", "ngoai PlanQuota " .. tostring(seedName))
+                    maxTry = 0
                 end
             end
 
@@ -4275,7 +4458,8 @@ function Runtime.doAutoShovelReplace()
     if not (c and c.Enabled) then return end
     if State.AntiStealEngaging or State.SellInProgress then return end
     if Runtime.ShouldYieldForSeedPriority("AutoShovelReplace")
-        or Runtime.ShouldYieldForPetPriority("AutoShovelReplace") then
+        or Runtime.ShouldYieldForPetPriority("AutoShovelReplace")
+        or Runtime.ShouldYieldForTrim("AutoShovelReplace") then
         return
     end
 
@@ -4550,22 +4734,31 @@ function Runtime.doTrimToQuota()
     end
     local shovelAttr = shovel:GetAttribute("Shovel")
 
-    local maxPerCycle = math.max(tonumber(c.MaxPerCycle) or 20, 1)
+    local maxPerCycle = tonumber(c.MaxPerCycle) or 20   -- 0 = KHÔNG giới hạn (1 vòng quét đào hết phần dư tới khi chạm Destroy Until)
+    local digDelay = math.max(tonumber(c.DigDelay) or 0.3, 0)   -- nghỉ giữa mỗi nhát đào (config: TrimToQuota.DigDelay)
     local liveTotal = plantTotal
     local dug = 0
+    State.TrimActiveUntil = os.clock() + 15   -- BÁO: đang trim -> tác vụ phụ nhường (ShouldYieldForTrim)
     for sName, b in pairs(bySpecies) do
-        if dug >= maxPerCycle then break end
+        if maxPerCycle > 0 and dug >= maxPerCycle then break end   -- maxPerCycle=0 -> bỏ giới hạn
         if destroyUntil and liveTotal <= destroyUntil then break end   -- đã về DestroyUntil -> dừng
         local cap = tonumber(quota[sName])
+        if cap == nil and c.DigUnlisted then cap = 0 end   -- ngoài PlanQuota -> đào sạch loại đó
         if cap and b.count > cap then
             local excess = math.min(b.count - cap, #b.diggable)   -- chỉ đào phần DƯ, chừa cây mutation
             for i = 1, excess do
-                if dug >= maxPerCycle then break end
+                -- EVENT rainbow/gold seed nổ -> DỪNG đào ngay đi claim (event ưu tiên nhất)
+                if Runtime.ShouldYieldForSeedPriority and Runtime.ShouldYieldForSeedPriority("TrimToQuota") then
+                    State.TrimActiveUntil = 0
+                    return
+                end
+                if maxPerCycle > 0 and dug >= maxPerCycle then break end   -- maxPerCycle=0 -> bỏ giới hạn
                 if destroyUntil and liveTotal <= destroyUntil then break end
                 local plant = b.diggable[i]
                 if plant and plant.Parent then
                     if not equipTool(shovel) then
                         actionLog("TrimToQuota", "SKIP", "cannot equip shovel")
+                        State.TrimActiveUntil = 0
                         return
                     end
                     -- fruitId="" -> đào cả cây
@@ -4573,15 +4766,17 @@ function Runtime.doTrimToQuota()
                     if ok then
                         dug = dug + 1
                         liveTotal = liveTotal - 1
+                        State.TrimActiveUntil = os.clock() + 15   -- refresh: vẫn đang trim
                         State.LastShovelReplace = os.date("%H:%M:%S") .. (" trim %s ->%d"):format(tostring(sName), cap)
                         actionLog("TrimToQuota", "DIG", ("%s con %d/%d"):format(tostring(sName), b.count - i, cap))
                     end
-                    if not waitAlive(0.3) then return end
+                    if not waitAlive(digDelay) then State.TrimActiveUntil = 0; return end
                 end
             end
         end
     end
 
+    State.TrimActiveUntil = 0   -- trim xong -> tác vụ phụ chạy lại ngay
     if dug > 0 then
         Runtime.ClearPlotFull()   -- còn chỗ trống -> AutoPlant trồng lại đúng quota
         actionLog("TrimToQuota", "DONE", ("dug=%d plants=%d/%s"):format(dug, liveTotal, tostring(totalPlots)))
@@ -4773,7 +4968,7 @@ end
 function Runtime.doAutoBuyGear()
     local c = CFG.AutoBuyGear
     if not (c and c.Enabled) then return end
-    if Runtime.ShouldYieldForSeedPriority("AutoBuyGear") or Runtime.ShouldYieldForPetPriority("AutoBuyGear") then
+    if Runtime.ShouldYieldForSeedPriority("AutoBuyGear") or Runtime.ShouldYieldForPetPriority("AutoBuyGear") or Runtime.ShouldYieldForTrim("AutoBuyGear") then
         return
     end
     if not packet({ "GearShop", "PurchaseGear" }) then
@@ -4974,7 +5169,7 @@ end
 function Runtime.doAutoBuyCrate()
     local c = CFG.AutoBuyCrate
     if not (c and c.Enabled) then return end
-    if Runtime.ShouldYieldForSeedPriority("AutoBuyCrate") or Runtime.ShouldYieldForPetPriority("AutoBuyCrate") then
+    if Runtime.ShouldYieldForSeedPriority("AutoBuyCrate") or Runtime.ShouldYieldForPetPriority("AutoBuyCrate") or Runtime.ShouldYieldForTrim("AutoBuyCrate") then
         return
     end
     if not packet({ "CrateShop", "PurchaseCrate" }) then
@@ -5200,7 +5395,7 @@ end
 function Runtime.doAutoCollect()
     local c = CFG.AutoCollect
     if not (c and c.Enabled) then return end
-    if Runtime.ShouldYieldForSeedPriority("AutoCollect") or Runtime.ShouldYieldForPetPriority("AutoCollect") then
+    if Runtime.ShouldYieldForSeedPriority("AutoCollect") or Runtime.ShouldYieldForPetPriority("AutoCollect") or Runtime.ShouldYieldForTrim("AutoCollect") then
         return
     end
     -- Wait For Mutations: nếu có list, CHỈ hái quả mang 1 trong các mutation này (chờ quả thường mutate).
@@ -5671,6 +5866,10 @@ function Runtime.doAutoCollectDrops()
                 )
                 State.LastDrop = os.date("%H:%M:%S") .. " " .. summary
                 actionLog("AutoCollectDrops", claimed and "DONE" or "RETRY", summary)
+                -- Claim seed event (rainbow/gold) XONG -> teleport VỀ NHÀ ngay (ý chồng)
+                if claimed and c.ReturnHomeAfterCollect ~= false then
+                    teleportToGardenHome("AutoCollectDrops", 0.03)
+                end
                 return
             else
                 teleportNearPosition(entry.Pos, c)
@@ -6021,6 +6220,7 @@ end
 function Runtime.doAutoHatchEgg()
     local c = CFG.AutoHatchEgg
     if not (c and c.Enabled) then return end
+    if Runtime.ShouldYieldForSeedPriority("AutoHatchEgg") or Runtime.ShouldYieldForTrim("AutoHatchEgg") then return end
     actionLog("AutoHatchEgg", "START")
     if not packet({ "Egg", "OpenEgg" }) then
         logw("AutoHatchEgg: thiếu Networking.Egg.OpenEgg -> tắt.")
@@ -6049,6 +6249,36 @@ local function getPetInventory()
     local inventory = data and data.Inventory
     local pets = inventory and inventory.Pets
     return type(pets) == "table" and pets or nil
+end
+
+-- Kho pet CHƯA equip = { [tên pet] = SỐ LƯỢNG }. Đọc từ 2 NGUỒN rồi lấy MAX (pet có thể nằm 1 trong 2):
+--   (1) replica Data.Inventory.Pets = {tên=số} (xác nhận PetEquipController.lua:113-114).
+--   (2) TOOL trong Backpack/nhân vật có attribute "Pet" = tên (như ValuableWatcher quét).
+-- Trả về { [tên pet] = số } (chỉ pet còn > 0).
+local function getUnequippedPetCounts()
+    local out = {}
+    -- (1) replica Inventory.Pets {tên=số}
+    local pets = getPetInventory()
+    if type(pets) == "table" then
+        for name, cnt in pairs(pets) do
+            if type(name) == "string" and name ~= "" then
+                local n = math.floor(tonumber(cnt) or 0)
+                if n > 0 then out[name] = n end
+            end
+        end
+    end
+    -- (2) pet dạng TOOL (attribute "Pet" = tên) -> lấy MAX để không sót
+    local toolCount = {}
+    for _, t in ipairs(getAllTools()) do
+        local pn = t:GetAttribute("Pet")
+        if type(pn) == "string" and pn ~= "" then
+            toolCount[pn] = (toolCount[pn] or 0) + 1
+        end
+    end
+    for name, n in pairs(toolCount) do
+        if n > (out[name] or 0) then out[name] = n end
+    end
+    return out
 end
 
 -- Đọc ĐÚNG cấu trúc kho pet: Data.Inventory.Pets = { [petId] = {Id,Name,Equipped,Type,...} }
@@ -6096,6 +6326,24 @@ local function getEquippedPetCounts()
         end
     end
     return counts, total
+end
+
+-- Danh sách pet ĐANG equip kèm Id (remote thật GetEquippedPets trả {Id,Name,Size,Type}).
+-- XÁC NHẬN SOURCE: PetListController u92 -> check pet.Id; unequip game dùng RequestUnequip(pet.Id).
+local function getEquippedPetList()
+    local out = {}
+    if not packet({ "Pets", "GetEquippedPets" }) then
+        return out
+    end
+    local ok, equipped = firePacket({ "Pets", "GetEquippedPets" })
+    if ok and type(equipped) == "table" then
+        for _, pet in pairs(equipped) do
+            if type(pet) == "table" and type(pet.Name) == "string" then
+                table.insert(out, { Id = pet.Id, Name = pet.Name })
+            end
+        end
+    end
+    return out
 end
 
 local function getMaxEquippedPets()
@@ -6158,6 +6406,30 @@ local function buildPetEquipCandidates()
     return out
 end
 
+-- Hook Notification: pet nào equip lỗi "No inventory folder for pet X" -> CHẶN equip lại trong 30s.
+-- Tránh vòng lặp tháo-rồi-equip-fail liên tục với pet bị mất folder. Tự hết hạn để retry nếu sau có pet.
+Runtime.PetEquipBlocked = Runtime.PetEquipBlocked or {}
+Runtime.SetupPetEquipWatcher = function()
+    if Runtime.PetEquipWatcherReady then return end
+    local note = packet({ "Notification" })
+    if not note or not note.OnClientEvent then return end
+    Runtime.PetEquipWatcherReady = true
+    local ok, conn = pcall(function()
+        return note.OnClientEvent:Connect(function(message)
+            if type(message) ~= "string" then return end
+            if string.find(string.lower(message), "no inventory folder", 1, true) then
+                local name = message:match('[Pp]et%s+"(.-)"') or message:match("[Pp]et%s+(%S+)")
+                if name and name ~= "" then
+                    Runtime.PetEquipBlocked[string.lower(name)] = os.clock() + 30
+                end
+            end
+        end)
+    end)
+    if ok and conn then
+        table.insert(Runtime.Cleanups, function() pcall(function() conn:Disconnect() end) end)
+    end
+end
+
 function Runtime.doAutoEquipPet()
     local c = CFG.AutoEquipPet
     if not (c and c.Enabled) then return end
@@ -6166,6 +6438,7 @@ function Runtime.doAutoEquipPet()
         c.Enabled = false
         return
     end
+    Runtime.SetupPetEquipWatcher()
 
     local maxEquipped = getMaxEquippedPets()
     -- want = số con MUỐN equip theo tên (List = RequiredPets). Rỗng -> Smart mode.
@@ -6180,94 +6453,133 @@ function Runtime.doAutoEquipPet()
         end
     end
 
-    -- ===== BƯỚC 1: UNEQUIP pet SAI/THỪA TRƯỚC (giải phóng slot) =====
-    -- List mode: LUÔN tháo pet KHÔNG nằm trong want, hoặc VƯỢT số want (không cần UnequipOthers).
-    -- Đây là fix cho bug: account đang equip Dog + 2 Deer mà yêu cầu 3 Deer -> phải tháo Dog trước.
-    if listMode and packet({ "Pets", "RequestUnequipByName" }) then
+    -- ===== BƯỚC 1: UNEQUIP pet SAI/THỪA TRƯỚC (theo Id - PetListController:262) =====
+    local unequippedAny = false
+    if listMode and packet({ "Pets", "RequestUnequip" }) then
         local kept = {}
-        for _, e in ipairs(Runtime.GetPetInventoryEntries()) do
-            if e.Equipped and type(e.Name) == "string" then
-                local k = string.lower(e.Name)
-                if (kept[k] or 0) < (want[k] or 0) then
-                    kept[k] = (kept[k] or 0) + 1   -- đúng pet & còn trong hạn -> GIỮ
-                else
-                    actionLog("AutoEquipPet", "UNEQUIP", "Wrong equipped pet: " .. tostring(e.Name))
-                    firePacket({ "Pets", "RequestUnequipByName" }, e.Name)
-                    if not waitAlive(0.25) then return end
-                end
+        for _, e in ipairs(getEquippedPetList()) do
+            local k = string.lower(tostring(e.Name))
+            if (kept[k] or 0) < (want[k] or 0) then
+                kept[k] = (kept[k] or 0) + 1   -- đúng pet & còn trong hạn -> GIỮ
+            elseif type(e.Id) == "string" and e.Id ~= "" then
+                actionLog("AutoEquipPet", "UNEQUIP", ("Wrong/excess: %s"):format(tostring(e.Name)))
+                firePacket({ "Pets", "RequestUnequip" }, e.Id)
+                unequippedAny = true
+                if not waitAlive(0.3) then return end
             end
         end
+    end
+    -- Vừa gỡ pet -> CHỜ vài giây cho pet rơi về Backpack (thành tool) rồi mới equip (chồng yêu cầu).
+    if unequippedAny then
+        if not waitAlive(2.5) then return end
     end
 
-    -- ===== BƯỚC 2: đọc lại kho SAU khi tháo -> đếm đang equip / chưa equip / slot trống =====
-    local equippedTotal, haveEq, avail = 0, {}, {}
-    for _, e in ipairs(Runtime.GetPetInventoryEntries()) do
-        if type(e.Name) == "string" then
-            local k = string.lower(e.Name)
-            if e.Equipped then
-                equippedTotal = equippedTotal + 1
-                haveEq[k] = (haveEq[k] or 0) + 1
-            else
-                avail[k] = (avail[k] or 0) + 1
-            end
-        end
-    end
-    local freeSlots = math.max(maxEquipped - equippedTotal, 0)
-    if freeSlots <= 0 and not listMode then
+    -- ===== BƯỚC 2: pet ĐANG equip (1 lần) + slot trống =====
+    local eqCounts, equippedTotal = getEquippedPetCounts()
+    local haveEq = {}
+    for name, cnt in pairs(eqCounts) do haveEq[string.lower(tostring(name))] = (tonumber(cnt) or 0) end
+    if maxEquipped - equippedTotal <= 0 then
         State.LastPet = os.date("%H:%M:%S") .. " slots full " .. tostring(equippedTotal) .. "/" .. tostring(maxEquipped)
         return
     end
 
-    -- ===== BƯỚC 3: EQUIP phần CÒN THIẾU (want - số đang equip cùng tên) =====
-    local equipped = 0
-    if listMode then
-        local added = {}
-        for _, petName in ipairs(c.List) do
-            if equipped >= freeSlots then break end
-            local k = string.lower(tostring(petName))
-            local already = (haveEq[k] or 0) + (added[k] or 0)
-            if already >= (want[k] or 0) then
-                -- đã đủ số con tên này -> bỏ qua
-            elseif (avail[k] or 0) > 0 then
-                actionLog("AutoEquipPet", "EQUIP", ("%s %d/%d"):format(tostring(petName), already + 1, want[k] or 1))
-                if firePacket({ "Pets", "RequestEquipByName" }, petName) then
-                    equipped = equipped + 1
-                    avail[k] = avail[k] - 1
-                    added[k] = (added[k] or 0) + 1
-                    Runtime.HideBlockingPopups()
+    -- Tìm TOOL pet trong Backpack/nhân vật THEO TÊN (tool.Name = tên pet, vd "Bunny"/"Robin"/"Deer";
+    -- xác nhận BackpackGui ToolName.Text + script chồng dùng Backpack:FindFirstChild(tên)). Khớp cả attr "Pet".
+    local function findPetTool(petName)
+        local lname = string.lower(tostring(petName))
+        for _, container in ipairs({ LocalPlayer:FindFirstChildOfClass("Backpack"), getCharacter() }) do
+            if container then
+                local exact = container:FindFirstChild(petName)
+                if exact and exact:IsA("Tool") then return exact end
+                for _, x in ipairs(container:GetChildren()) do
+                    if x:IsA("Tool") then
+                        if string.lower(x.Name) == lname then return x end
+                        local pa = x:GetAttribute("Pet")
+                        if type(pa) == "string" and string.lower(pa) == lname then return x end
+                    end
                 end
-                if not waitAlive(0.3) then return end
-            else
-                actionLog("AutoEquipPet", "SKIP", "chua co pet " .. tostring(petName))
             end
         end
-        -- log "final equipped valid": <tên> x<final>/<want>
+        return nil
+    end
+
+    -- EQUIP = CẦM tool lên tay + RequestEquipByName + Activate + click giữa màn hình (cách chồng test chạy được).
+    local function holdEquip(tool, petName)
+        local char = getCharacter()
+        if not (char and tool and tool.Parent) then return false end
+        local hum = getHumanoid()
+        if hum then pcall(function() hum:EquipTool(tool) end) end
+        if tool.Parent ~= char then pcall(function() tool.Parent = char end) end  -- CẦM lên tay
+        if not waitAlive(0.5) then return false end
+        firePacket({ "Pets", "RequestEquipByName" }, petName)
+        pcall(function() tool:Activate() end)
+        local x, y = getViewportCenter()
+        for _ = 1, 3 do
+            Runtime.SendTapAt(x, y, 0.08, { UseVirtualInput = true, UseTouchInput = true })
+            if not waitAlive(0.2) then break end
+        end
+        Runtime.HideBlockingPopups()
+        return true
+    end
+
+    -- ===== BƯỚC 3: EQUIP phần CÒN THIẾU =====
+    local equipped = 0
+    if listMode then
+        local order, firstName = {}, {}
+        for _, n in ipairs(c.List) do
+            local k = string.lower(tostring(n))
+            if not firstName[k] then firstName[k] = n; table.insert(order, k) end
+        end
+        for _, k in ipairs(order) do
+            local petName = firstName[k]
+            while (haveEq[k] or 0) < (want[k] or 0) and equippedTotal < maxEquipped do
+                local tool = findPetTool(petName)
+                if not tool then
+                    actionLog("AutoEquipPet", "SKIP", "khong co tool trong backpack: " .. tostring(petName))
+                    break
+                end
+                actionLog("AutoEquipPet", "EQUIP", ("hold %s %d/%d"):format(tostring(petName), (haveEq[k] or 0) + 1, want[k]))
+                if holdEquip(tool, petName) then
+                    equipped = equipped + 1
+                    equippedTotal = equippedTotal + 1
+                    haveEq[k] = (haveEq[k] or 0) + 1
+                else
+                    break
+                end
+                if not waitAlive(0.4) then return end
+            end
+        end
         local parts = {}
         for k, n in pairs(want) do
-            table.insert(parts, ("%s x%d/%d"):format(k, (haveEq[k] or 0) + (added[k] or 0), n))
+            table.insert(parts, ("%s x%d/%d"):format(k, haveEq[k] or 0, n))
         end
         if #parts > 0 then
             actionLog("AutoEquipPet", "DONE", "Final valid: " .. table.concat(parts, ", "))
         end
     else
-        local candidates, reason = buildPetEquipCandidates()
-        if #candidates == 0 then
-            actionLog("AutoEquipPet", "SKIP", tostring(reason or "no pets"))
+        -- Smart: equip mọi tool pet trong backpack (Name là pet trong PetData), xịn nhất trước.
+        local bp = LocalPlayer:FindFirstChildOfClass("Backpack")
+        local cands = {}
+        if bp then
+            for _, x in ipairs(bp:GetChildren()) do
+                if x:IsA("Tool") and PetData and PetData[x.Name] then
+                    table.insert(cands, { Tool = x, Name = x.Name, Score = getPetScore(x.Name) })
+                end
+            end
+        end
+        if #cands == 0 then
+            actionLog("AutoEquipPet", "SKIP", "khong co tool pet de equip")
             return
         end
-        for _, pet in ipairs(candidates) do
-            while pet.Count > 0 and equipped < freeSlots do
-                actionLog("AutoEquipPet", "EQUIP", pet.Name .. " " .. tostring(pet.Rarity))
-                if firePacket({ "Pets", "RequestEquipByName" }, pet.Name) then
-                    equipped = equipped + 1
-                    pet.Count = pet.Count - 1
-                    Runtime.HideBlockingPopups()
-                else
-                    pet.Count = 0
-                end
-                if not waitAlive(0.3) then return end
+        table.sort(cands, function(a, b) return a.Score > b.Score end)
+        for _, pet in ipairs(cands) do
+            if equippedTotal >= maxEquipped then break end
+            actionLog("AutoEquipPet", "EQUIP", "hold " .. tostring(pet.Name))
+            if holdEquip(pet.Tool, pet.Name) then
+                equipped = equipped + 1
+                equippedTotal = equippedTotal + 1
             end
-            if equipped >= freeSlots then break end
+            if not waitAlive(0.4) then return end
         end
     end
 
@@ -6518,7 +6830,7 @@ end
 local function doAutoWater()
     local c = CFG.AutoWater
     if not (c and c.Enabled) then return end
-    if Runtime.ShouldYieldForSeedPriority("AutoWater") or Runtime.ShouldYieldForPetPriority("AutoWater") then
+    if Runtime.ShouldYieldForSeedPriority("AutoWater") or Runtime.ShouldYieldForPetPriority("AutoWater") or Runtime.ShouldYieldForTrim("AutoWater") then
         return
     end
     if not packet({ "WateringCan", "UseWateringCan" }) then
@@ -6556,7 +6868,7 @@ end
 local function doAutoSprinkler()
     local c = CFG.AutoSprinkler
     if not (c and c.Enabled) then return end
-    if Runtime.ShouldYieldForSeedPriority("AutoSprinkler") or Runtime.ShouldYieldForPetPriority("AutoSprinkler") then
+    if Runtime.ShouldYieldForSeedPriority("AutoSprinkler") or Runtime.ShouldYieldForPetPriority("AutoSprinkler") or Runtime.ShouldYieldForTrim("AutoSprinkler") then
         return
     end
     if not packet({ "Place", "PlaceSprinkler" }) then
@@ -6610,7 +6922,7 @@ end
 function Runtime.doAutoOpenCrate()
     local c = CFG.AutoOpenCrate
     if not (c and c.Enabled) then return end
-    if Runtime.ShouldYieldForSeedPriority("AutoOpenCrate") or Runtime.ShouldYieldForPetPriority("AutoOpenCrate") then
+    if Runtime.ShouldYieldForSeedPriority("AutoOpenCrate") or Runtime.ShouldYieldForPetPriority("AutoOpenCrate") or Runtime.ShouldYieldForTrim("AutoOpenCrate") then
         return
     end
     if not packet({ "Crate", "OpenCrate" }) then
@@ -6632,7 +6944,7 @@ end
 function Runtime.doAutoOpenSeedPack()
     local c = CFG.AutoOpenSeedPack
     if not (c and c.Enabled) then return end
-    if Runtime.ShouldYieldForSeedPriority("AutoOpenSeedPack") or Runtime.ShouldYieldForPetPriority("AutoOpenSeedPack") then
+    if Runtime.ShouldYieldForSeedPriority("AutoOpenSeedPack") or Runtime.ShouldYieldForPetPriority("AutoOpenSeedPack") or Runtime.ShouldYieldForTrim("AutoOpenSeedPack") then
         return
     end
     if not packet({ "SeedPack", "OpenSeedPack" }) then
@@ -6761,10 +7073,26 @@ local function resolveMailboxRecipient(c, actionName)
     if type(c) ~= "table" then
         return nil
     end
-    if type(c.RecipientUserId) == "number" and c.RecipientUserId > 0 then
+    -- NHIỀU NGƯỜI NHẬN: RecipientUsernames là list -> random 1 tên mỗi lần gửi.
+    -- (1 tên = luôn gửi acc đó; nhiều tên = chia random). Có list thì BỎ QUA RecipientUserId.
+    local username = c.RecipientUsername
+    local hasList = false
+    if type(c.RecipientUsernames) == "table" then
+        local pool = {}
+        for _, nm in ipairs(c.RecipientUsernames) do
+            if type(nm) == "string" and nm ~= "" then table.insert(pool, nm) end
+        end
+        if #pool > 0 then
+            hasList = true
+            username = pool[math.random(1, #pool)]
+            if #pool > 1 then
+                actionLog(actionName or "AutoMail", "TO", "random -> " .. tostring(username))
+            end
+        end
+    end
+    if (not hasList) and type(c.RecipientUserId) == "number" and c.RecipientUserId > 0 then
         return c.RecipientUserId, c.RecipientUsername
     end
-    local username = c.RecipientUsername
     if type(username) ~= "string" or username == "" then
         actionLog(actionName or "AutoMail", "SKIP", "missing recipient")
         return nil
@@ -6830,6 +7158,7 @@ local function buildAutoMailSeedConfig()
     return {
         Enabled = enabled,
         RecipientUsername = base.RecipientUsername or rb.RecipientUsername,
+        RecipientUsernames = base.RecipientUsernames or rb.RecipientUsernames,   -- FIX: copy list nhiều acc (random gửi)
         RecipientUserId = tonumber(base.RecipientUserId) or tonumber(rb.RecipientUserId) or 0,
         Note = base.Note ~= nil and base.Note or rb.Note,
         DelayBeforeSend = tonumber(base.DelayBeforeSend) or tonumber(rb.DelayBeforeSend) or 0,
@@ -7090,10 +7419,23 @@ do
     end
 
     local function resolveMailRainbowRecipient(c)
-        if type(c.RecipientUserId) == "number" and c.RecipientUserId > 0 then
+        -- Nhiều người nhận: RecipientUsernames là list -> random 1 tên mỗi lần (có list thì bỏ qua UserId).
+        local username = c.RecipientUsername
+        local hasList = false
+        if type(c.RecipientUsernames) == "table" then
+            local pool = {}
+            for _, nm in ipairs(c.RecipientUsernames) do
+                if type(nm) == "string" and nm ~= "" then table.insert(pool, nm) end
+            end
+            if #pool > 0 then
+                hasList = true
+                username = pool[math.random(1, #pool)]
+                if #pool > 1 then actionLog("AutoMailRainbow", "TO", "random -> " .. tostring(username)) end
+            end
+        end
+        if (not hasList) and type(c.RecipientUserId) == "number" and c.RecipientUserId > 0 then
             return c.RecipientUserId
         end
-        local username = c.RecipientUsername
         if type(username) ~= "string" or username == "" then
             actionLog("AutoMailRainbow", "SKIP", "chua cau hinh recipient")
             return nil
@@ -7244,10 +7586,23 @@ do
     local MailPetSeq = 0      -- tạo webhook key duy nhất mỗi lần gửi
 
     local function resolveMailPetRecipient(c)
-        if type(c.RecipientUserId) == "number" and c.RecipientUserId > 0 then
+        -- Nhiều người nhận: RecipientUsernames là list -> random 1 tên mỗi lần (có list thì bỏ qua UserId).
+        local username = c.RecipientUsername
+        local hasList = false
+        if type(c.RecipientUsernames) == "table" then
+            local pool = {}
+            for _, nm in ipairs(c.RecipientUsernames) do
+                if type(nm) == "string" and nm ~= "" then table.insert(pool, nm) end
+            end
+            if #pool > 0 then
+                hasList = true
+                username = pool[math.random(1, #pool)]
+                if #pool > 1 then actionLog("AutoMailPets", "TO", "random -> " .. tostring(username)) end
+            end
+        end
+        if (not hasList) and type(c.RecipientUserId) == "number" and c.RecipientUserId > 0 then
             return c.RecipientUserId
         end
-        local username = c.RecipientUsername
         if type(username) ~= "string" or username == "" then
             actionLog("AutoMailPets", "SKIP", "chua cau hinh recipient")
             return nil
@@ -7566,11 +7921,15 @@ local function buildWildPetCandidates(c)
     end
     local owned = {}
     if capMap then
-        for _, e in ipairs(Runtime.GetPetInventoryEntries()) do
-            if type(e.Name) == "string" then
-                local k = string.lower(e.Name)
-                owned[k] = (owned[k] or 0) + 1
-            end
+        -- TỔNG sở hữu mỗi tên = đang equip (GetEquippedPets) + chưa equip (Inventory.Pets/tool).
+        -- (Trước dùng GetPetInventoryEntries đọc sai cấu trúc -> owned=0 -> mua dư pet vô hạn.)
+        for name, cnt in pairs(select(1, getEquippedPetCounts())) do
+            local k = string.lower(tostring(name))
+            owned[k] = (owned[k] or 0) + (tonumber(cnt) or 0)
+        end
+        for name, cnt in pairs(getUnequippedPetCounts()) do
+            local k = string.lower(tostring(name))
+            owned[k] = (owned[k] or 0) + (tonumber(cnt) or 0)
         end
     end
     local planned = {}  -- đếm số đã thêm vào candidate theo tên (để không vượt cap trong 1 vòng)
@@ -8145,6 +8504,7 @@ local function loopTask(name, fn, getDelay)
                 delay = 1
             end
             delay = Runtime.AdaptiveDelay(name, delay or 1)
+            delay = Runtime.ApplySideTaskMinDelay(name, delay)   -- ép tác vụ phụ >= SideTaskMinDelay (FPS)
             if not waitAlive(delay or 1) then
                 break
             end
