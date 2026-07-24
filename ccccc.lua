@@ -117,7 +117,7 @@ local CFG = {
 	--    (co .Touched de server nhan) + child ten "CoinVisual".
 	--  * Teleport = ANCHOR rootPart roi set CFrame tien tung buoc CoinStepStuds toi
 	--    thang coin.CFrame (khong cong HipHeight). Anchor de khong bi physics keo/rot.
-	CoinStepStuds = 20, -- CHI dung khi DirectTeleport=false (fallback nhay tung stud)
+	CoinStepStuds = 25, -- CHI dung khi DirectTeleport=false (fallback nhay tung stud)
 	AnchorWhileCollecting = true, -- anchor rootPart khi collect (main.lua da test)
 	CoinScanRange = 0, -- chi nhat coin trong ban kinh nay (0 = khong gioi han), main.lua MAX_DISTANCE
 	-- CHONG CHON: quay ve teleport TUNG STUD (segmented CoinStepStuds) NHUNG van bat
@@ -150,9 +150,9 @@ local CFG = {
 	-- vat can; anchor van giu khong roi. Roi collect thi tra lai CanCollide. Tat = false.
 	Noclip = true,
 
-	MoveDelay = 0.35, -- nhip tick FarmMove (giay) - GIONG main.lua DEFAULT_DELAY
+	MoveDelay = 0.4, -- nhip tick FarmMove (giay) - GIONG main.lua DEFAULT_DELAY
 	-- CHECK COIN NHANH: nhip chon/quet coin khi dang round. Nho = check nhanh hon.
-	CoinScanDelay = 0.05,
+	CoinScanDelay = 0.1,
 	-- Bao lau rescan lai CoinContainer (giay). Nho = bat coin map moi nhanh hon.
 	ContainerRescanSeconds = 1,
 	ArrivalRadius = 5,
