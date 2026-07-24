@@ -70,7 +70,7 @@ local CFG = {
 	Enabled = true,
 	AutoCollect = true,
 	AutoHide = true,
-	AvoidMurderer = true,
+	AvoidMurderer = false,
 	-- Khi da nhat xong (CollectionFinished) VA chi con MINH minh song (het innocent
 	-- khac) -> tu teleport tung buoc ra TRUOC MAT murderer cho bi giet, ket thuc van
 	-- de vao van moi nhanh. Tat = false neu chong muon o lai nup.
