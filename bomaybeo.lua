@@ -734,6 +734,16 @@ local function getShells()
 		or 0
 end
 
+local function getShopCoins()
+	if not ProfileData then return 0 end
+	local cp = ProfileData.Coins
+	if cp == nil and type(ProfileData.Materials) == "table" 
+		and type(ProfileData.Materials.Owned) == "table" then
+		cp = ProfileData.Materials.Owned.Coins
+	end
+	return tonumber(cp) or 0
+end
+
 local function sendWebhook(content)
 	local url = tostring(CFG.WebhookUrl or "")
 	if url == "" then
@@ -3729,12 +3739,23 @@ addTask("AutoChangeAcc", function()
 	if config and playerQuest then
 		local progress = tonumber(playerQuest.Progress) or 0
 		
+		-- Logic Change Acc & GUI update:
+		local finalTarget = 0
+		local completedTiers = 0
+		for _, tier in ipairs(config.Quests) do
+			local target = tonumber(tier.ChallengeAmount) or 0
+			finalTarget = target
+			if progress >= target then
+				completedTiers = completedTiers + 1
+			end
+		end
+		
+		Runtime.DailyQuestProgressText = string.format("Mốc %d/%d (Tiến độ: %d/%d)", completedTiers, #config.Quests, progress, finalTarget)
+		
 		-- In ra log mỗi khi progress thay đổi
 		if progress ~= lastQuestProgress then
 			lastQuestProgress = progress
-			local completedTiers = 0
 			local nextTarget = nil
-			local finalTarget = 0
 			
 			pushLog("========== " .. string.upper(questName) .. " ==========")
 			pushLog("Tên: " .. tostring(config.Title or questName))
@@ -3743,11 +3764,8 @@ addTask("AutoChangeAcc", function()
 			
 			for index, tier in ipairs(config.Quests) do
 				local target = tonumber(tier.ChallengeAmount) or 0
-				finalTarget = target
 				local completed = progress >= target
-				if completed then
-					completedTiers = completedTiers + 1
-				elseif not nextTarget then
+				if not completed and not nextTarget then
 					nextTarget = target
 				end
 				pushLog(string.format("Mốc %d: %d/%d | %s", index, math.min(progress, target), target, completed and "ĐÃ XONG" or "CHƯA XONG"))
@@ -3767,12 +3785,7 @@ addTask("AutoChangeAcc", function()
 			end
 		end
 
-		-- Logic Change Acc:
-		-- Nếu ĐÃ XONG 6 mốc (hoàn thành) VÀ tiền sò < BoxPrice -> call autoswap
-		local finalTarget = 0
-		for _, tier in ipairs(config.Quests) do
-			finalTarget = tonumber(tier.ChallengeAmount) or finalTarget
-		end
+		-- Nếu ĐÃ XONG 6 mốc VÀ tiền sò < BoxPrice -> call autoswap
 		
 		if progress >= finalTarget then
 			if getShells() < (tonumber(CFG.BoxPrice) or math.huge) then
@@ -3862,16 +3875,18 @@ local function createGui()
 		return label
 	end
 
-	local titleLabel = makeRow(0, 46, "💰  THIEU NANG HUB", Color3.fromRGB(120, 210, 255), 34, true)
-	local accountLabel = makeRow(1, 26, "", Color3.fromRGB(120, 255, 190), 18, true)
-	local phaseLabel = makeRow(2, 26, "", nil, 18, false)
-	local roleLabel = makeRow(3, 26, "", nil, 18, false)
-	local murdererLabel = makeRow(4, 26, "", Color3.fromRGB(255, 150, 150), 18, false)
-	local coinLabel = makeRow(5, 40, "", Color3.fromRGB(255, 220, 120), 26, true)
-	local shellLabel = makeRow(6, 26, "", Color3.fromRGB(255, 190, 120), 18, true)
-	local perfLabel = makeRow(7, 22, "", Color3.fromRGB(150, 200, 170), 14, false)
-	local statusLabel = makeRow(8, 44, "", Color3.fromRGB(255, 210, 105), 15, false)
-	local uptimeLabel = makeRow(9, 24, "", Color3.fromRGB(150, 170, 200), 15, false)
+	local titleLabel = makeRow(0, 56, "💰  THIEU NANG HUB", Color3.fromRGB(120, 210, 255), 40, true)
+	local accountLabel = makeRow(1, 32, "", Color3.fromRGB(120, 255, 190), 22, true)
+	local phaseLabel = makeRow(2, 32, "", nil, 22, true)
+	local roleLabel = makeRow(3, 32, "", nil, 22, true)
+	local murdererLabel = makeRow(4, 32, "", Color3.fromRGB(255, 150, 150), 22, true)
+	local coinLabel = makeRow(5, 46, "", Color3.fromRGB(245, 230, 25), 32, true)
+	local shopCoinLabel = makeRow(6, 32, "", Color3.fromRGB(240, 220, 80), 22, true)
+	local shellLabel = makeRow(7, 32, "", Color3.fromRGB(255, 190, 120), 22, true)
+	local questLabel = makeRow(8, 38, "", Color3.fromRGB(150, 255, 50), 26, true)
+	local perfLabel = makeRow(9, 28, "", Color3.fromRGB(150, 200, 170), 18, false)
+	local statusLabel = makeRow(10, 52, "", Color3.fromRGB(255, 210, 105), 18, true)
+	local uptimeLabel = makeRow(11, 28, "", Color3.fromRGB(150, 170, 200), 18, false)
 
 	-- Logs NHO dock day man hinh: CHI tao khi DevDebug bat (console debug ngoai).
 	local logLabel = nil
@@ -3936,7 +3951,9 @@ local function createGui()
 		Role = roleLabel,
 		Murderer = murdererLabel,
 		Coin = coinLabel,
+		ShopCoin = shopCoinLabel,
 		Shell = shellLabel,
+		Quest = questLabel,
 		Perf = perfLabel,
 		Status = statusLabel,
 		Uptime = uptimeLabel,
@@ -3963,12 +3980,20 @@ local function refreshGui()
 		.. "   •   " .. (State.MurdererDistance >= 0
 			and (string.format("%.0f", State.MurdererDistance) .. " st")
 			or "? st")
-	refs.Coin.Text = "💰  " .. tostring(State.Collected)
-		.. " coin   •   con lai: " .. tostring(State.CoinsLeft)
+	refs.Coin.Text = "🪙  Vòng Này: " .. tostring(State.Collected)
+		.. " coin   •   Còn rơi: " .. tostring(State.CoinsLeft)
+	
+	if refs.ShopCoin then
+		refs.ShopCoin.Text = "💵  Tổng Coin: " .. tostring(getShopCoins())
+	end
+	
 	refs.Shell.Text = "🐚  Shells: " .. tostring(getShells())
 		.. " / " .. tostring(CFG.BoxPrice)
-		.. "   •   Box mo: " .. tostring(Runtime.BoxesOpened or 0)
+		.. "   •   Box mở: " .. tostring(Runtime.BoxesOpened or 0)
 		.. (State.GodlyItem and ("   •   GODLY: " .. tostring(State.GodlyItem)) or "")
+	if refs.Quest then
+		refs.Quest.Text = "📜  Daily Quest: " .. tostring(Runtime.DailyQuestProgressText or "Đang chờ...")
+	end
 	refs.Perf.Text = string.format(
 		"⚡  FPS %.0f   •   Heap %.0f MB   •   noclip %s",
 		State.FPS,
