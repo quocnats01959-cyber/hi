@@ -117,7 +117,7 @@ local CFG = {
 	--    (co .Touched de server nhan) + child ten "CoinVisual".
 	--  * Teleport = ANCHOR rootPart roi set CFrame tien tung buoc CoinStepStuds toi
 	--    thang coin.CFrame (khong cong HipHeight). Anchor de khong bi physics keo/rot.
-	CoinStepStuds = 25, -- CHI dung khi DirectTeleport=false (fallback nhay tung stud)
+	CoinStepStuds = 20, -- CHI dung khi DirectTeleport=false (fallback nhay tung stud)
 	AnchorWhileCollecting = true, -- anchor rootPart khi collect (main.lua da test)
 	CoinScanRange = 0, -- chi nhat coin trong ban kinh nay (0 = khong gioi han), main.lua MAX_DISTANCE
 	-- CHONG CHON: quay ve teleport TUNG STUD (segmented CoinStepStuds) NHUNG van bat
