@@ -151,6 +151,10 @@ local CFG = {
 	Noclip = true,
 
 	MoveDelay = 0.35, -- nhip tick FarmMove (giay) - GIONG main.lua DEFAULT_DELAY
+	-- CHECK COIN NHANH: nhip chon/quet coin khi dang round. Nho = check nhanh hon.
+	CoinScanDelay = 0.05,
+	-- Bao lau rescan lai CoinContainer (giay). Nho = bat coin map moi nhanh hon.
+	ContainerRescanSeconds = 1,
 	ArrivalRadius = 5,
 	StuckSeconds = 3,
 	RetryDelay = 1.5,
@@ -1137,7 +1141,8 @@ end
 local function forEachClaimableCoin(callback)
 	if type(Runtime.CoinContainers) ~= "table"
 		or #Runtime.CoinContainers == 0
-		or os.clock() - (Runtime.LastContainerScan or 0) >= 5 then
+		or os.clock() - (Runtime.LastContainerScan or 0)
+			>= (tonumber(CFG.ContainerRescanSeconds) or 2) then
 		refreshCoinContainers()
 	end
 	local containers = Runtime.CoinContainers
@@ -1411,6 +1416,12 @@ local function normalizeConfig()
 		30
 	)
 	CFG.ArrivalRadius = math.clamp(tonumber(CFG.ArrivalRadius) or 5, 1, 12)
+	CFG.CoinScanDelay = math.clamp(tonumber(CFG.CoinScanDelay) or 0.25, 0.05, 2)
+	CFG.ContainerRescanSeconds = math.clamp(
+		tonumber(CFG.ContainerRescanSeconds) or 2,
+		0.5,
+		30
+	)
 	CFG.StuckSeconds = math.clamp(tonumber(CFG.StuckSeconds) or 3, 1, 15)
 	CFG.RetryDelay = math.clamp(tonumber(CFG.RetryDelay) or 1.5, 0.25, 10)
 	CFG.PanicDistance = math.max(5, tonumber(CFG.PanicDistance) or 35)
@@ -3161,6 +3172,9 @@ if R_CoinsStarted then
 		resetRoundState("waiting")
 		State.RoundActive = true
 		State.CoinsStartedActive = true
+		-- Ep rescan CoinContainer NGAY (map moi) de bat coin lien, khong cho cache.
+		Runtime.LastContainerScan = 0
+		Runtime.CoinContainers = nil
 		-- XAC NHAN THAT: CoinBagContainerScript.lua:51-59 doc p11[bagName] ~= nil.
 		-- activeBags la table key theo bagName (= bagId cua CoinCollected), gia tri
 		-- danh dau bag do dang active. Nap vao ActiveBags de allKnownBagsFull() dung.
@@ -3288,22 +3302,23 @@ local IMPORTANT_TASKS = {
 
 local function adaptiveDelay(name, baseDelay)
 	local delay = tonumber(baseDelay) or 1
+	-- Task QUAN TRONG (FarmMove/CoinScan/FpsCap): giu DUNG baseDelay, KHONG phat theo
+	-- FPS va KHONG jitter -> CHECK COIN NHANH. FPS thap la do cap co y (TargetFPS),
+	-- khong phai lag that nen khong duoc lam cham farm.
+	if IMPORTANT_TASKS[name] then
+		return math.max(delay, 0.02)
+	end
 	if CFG.CpuSaver then
 		if State.FPS > 0 and State.FPS < CFG.CriticalFpsThreshold then
-			delay = delay * (IMPORTANT_TASKS[name] and 1.25 or 2.4)
+			delay = delay * 2.4
 		elseif State.FPS > 0 and State.FPS < CFG.LowFpsThreshold then
-			delay = delay * (IMPORTANT_TASKS[name] and 1.08 or 1.6)
-		elseif not IMPORTANT_TASKS[name] then
+			delay = delay * 1.6
+		else
 			delay = math.max(delay * 1.2, 0.2)
 		end
 		local jitter = tonumber(CFG.Jitter) or 0
 		if jitter > 0 then
-			if name == "FarmMove" then
-				-- Khong cho jitter am lam vuot tran studs/giay noi bo.
-				delay = delay * (1 + math.random() * jitter)
-			else
-				delay = delay * (1 + (math.random() * 2 - 1) * jitter)
-			end
+			delay = delay * (1 + (math.random() * 2 - 1) * jitter)
 		end
 	end
 	return math.max(delay, 0.02)
@@ -3526,7 +3541,7 @@ addTask("FarmMove", farmMoveStep, function()
 	return State.RoundActive and CFG.MoveDelay or 1
 end)
 addTask("CoinScan", coinScanTask, function()
-	return State.RoundActive and 0.5 or 2
+	return State.RoundActive and CFG.CoinScanDelay or 2
 end)
 addTask("RoleRefresh", function()
 	if State.RoundActive then
